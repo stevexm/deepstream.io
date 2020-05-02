@@ -35,6 +35,7 @@ import HTTPMonitoring from '../services/monitoring/http/monitoring-http'
 import LogMonitoring from '../services/monitoring/log/monitoring-log'
 import { InitialLogs } from './js-yaml-loader'
 import * as configValidator from './config-validator'
+import HeapSnapshot from '../plugins/heap-snapshot/heap-snapshot'
 
 let commandLineArguments: any
 
@@ -206,8 +207,10 @@ function handleCustomPlugins (config: DeepstreamConfig, services: any): void {
 
   for (const key in plugins) {
     const plugin = plugins[key]
-    if (plugin) {
-      const PluginConstructor = resolvePluginClass(plugin, key, services.logger)
+    if (plugin.name === 'heap-snapshot') {
+      services.plugins[key] = new HeapSnapshot(plugin.options || {}, services)
+    } else {
+      const PluginConstructor = resolvePluginClass(plugin, 'plugin', services.logger)
       services.plugins[key] = new PluginConstructor(plugin.options || {}, services, config)
     }
   }
@@ -277,9 +280,15 @@ function resolvePluginClass (plugin: PluginConfig, type: string, logger: Deepstr
   let pluginConstructor
   let es6Adaptor
   if (plugin.path != null) {
-    requirePath = fileUtils.lookupLibRequirePath(plugin.path)
-    es6Adaptor = req(requirePath)
-    pluginConstructor = es6Adaptor.default ? es6Adaptor.default : es6Adaptor
+    try {
+      requirePath = fileUtils.lookupLibRequirePath(plugin.path)
+      es6Adaptor = req(requirePath)
+      pluginConstructor = es6Adaptor.default ? es6Adaptor.default : es6Adaptor
+    } catch (error) {
+      logger.fatal(EVENT.CONFIG_ERROR, `Error loading ${type} plugin via path ${requirePath}`)
+      // Throw error due to how tests are written
+      throw new Error()
+    }
   } else if (plugin.name != null && type) {
     try {
       requirePath = fileUtils.lookupLibRequirePath(`@deepstream/${type.toLowerCase()}-${plugin.name.toLowerCase()}`)
@@ -292,19 +301,27 @@ function resolvePluginClass (plugin: PluginConfig, type: string, logger: Deepstr
       } catch (secondError) {
         logger.debug(EVENT.CONFIG_ERROR, `Error loading module ${firstPath}: ${firstError}`)
         logger.debug(EVENT.CONFIG_ERROR, `Error loading module ${requirePath}: ${secondError}`)
-        throw new Error(`Cannot load module ${firstPath} or ${requirePath}`)
+        logger.fatal(EVENT.CONFIG_ERROR, 'Error loading module, exiting')
+        // Throw error due to how tests are written
+        throw new Error()
       }
     }
     pluginConstructor = es6Adaptor.default ? es6Adaptor.default : es6Adaptor
   } else if (plugin.name != null) {
-    requirePath = fileUtils.lookupLibRequirePath(plugin.name)
-    es6Adaptor = req(requirePath)
-    pluginConstructor = es6Adaptor.default ? es6Adaptor.default : es6Adaptor
+    try {
+      requirePath = fileUtils.lookupLibRequirePath(plugin.name)
+      es6Adaptor = req(requirePath)
+      pluginConstructor = es6Adaptor.default ? es6Adaptor.default : es6Adaptor
+    } catch (error) {
+      logger.fatal(EVENT.CONFIG_ERROR, `Error loading ${type} plugin via name ${plugin.name}`)
+      // Throw error due to how tests are written
+      throw new Error()
+    }
   } else if (plugin.type === 'default' && defaultPlugins.has(type as any)) {
     pluginConstructor = defaultPlugins.get(type as any)
   } else {
     // This error is used to bubble the event due to how tests are written
-    throw new Error(`Neither name nor path property found for ${type}, plugin type: ${plugin.type}`)
+    throw new Error(`Neither name nor path property found for ${type} plugin type: ${plugin.type}`)
   }
   return pluginConstructor
 }
@@ -388,6 +405,10 @@ function handlePermissionStrategies (config: DeepstreamConfig, services: Deepstr
       throw new Error(`unable to resolve plugin ${permission.name || permission.path}`)
     }
   } else if (permission.type && (permissionStrategies as any)[permission.type]) {
+    if (config.permission.options && config.permission.options.path) {
+      const req = require
+      config.permission.options.permissions = req(fileUtils.lookupConfRequirePath(config.permission.options.path))
+    }
     PermissionHandlerClass = (permissionStrategies as any)[permission.type]
   } else {
     throw new Error(`Unknown permission type ${permission.type}`)
